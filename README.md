@@ -120,3 +120,7 @@ with TR() as tr:
 - **Protocol doc gaps:** `trcp` sends a storage-type byte before the paths that the protocol document omits; this was taken from the firmware source.
 - **Not implemented:** only the deprecated JSON directory listing (`0x64DD`); everything else in the protocol has a command (ping and debug are left out on purpose).
 - **Status:** developed against a TR+ on firmware v0.8. Verified on the real device: `trls`, `trget`, `trput`, `trrm`, `trcp`, `trmv` (SD card and USB drive), `trstat`, `trpeek`, `trpoke`, `trpause`, `trtype` (F3), `trscreendump`. `trspans` was tried and firmware v0.8 does not have the span command (it answers `Unk cmd: 0x64fc`, which `trspans` reports as "firmware doesn't support span writes"); its encoding was checked only against a mock, so it needs newer firmware to be proven. Also checked only against mocks: `trsid`, `trcolor`, `trscreenshot` graphics modes, and the `trrun` handshake and SID verdict. Not tried: `trreset`, and a real launch with `trrun`. `trls tr:/` was tried and stalls (see above); after it and a launch of a nonexistent `tr:` item, the test TR+ stopped answering reads of more than about 200 bytes until it was power-cycled, so avoid both on a machine you care about.
+
+## License
+
+[Apache-2.0](LICENSE)
