@@ -46,7 +46,7 @@ All commands exit 0 on success and 1 on any error, printing a message to stderr.
 |---|---|---|
 | `trls` | `trls [-l] [drive:]path` | List a directory. Directories first, then files, sorted by name. `-l` adds type and size. Large directories are fetched in pages of 200. |
 | `trget` | `trget [-f] [drive:]/file [local]` | Download a file. The local name defaults to the remote file name; `-` writes to stdout. Verifies the 16-bit checksum, writes to `<name>.part` and renames on success. Refuses to overwrite a local file unless `-f`. |
-| `trput` | `trput [-f] local [drive:]/dest` | Upload a file. A destination ending in `/` keeps the local name; `-` as the local file reads stdin (then give a full remote path). Missing folders are created. The TR refuses to write over an existing file ("File already exists"); `-f` deletes the old one first, so the replacement is not atomic. The TR verifies the checksum. |
+| `trput` | `trput [-f] local... [drive:]/dest` | Upload one or more files (so `trput *.prg usb:` works). A destination ending in `/` (or a bare `usb:`) keeps the local names and is required for several files; `-` as the local file reads stdin (then give a full remote path). Missing folders are created. The TR refuses to write over an existing file ("File already exists"); `-f` deletes the old one first, so the replacement is not atomic. The TR verifies the checksum. |
 | `trrm` | `trrm [drive:]/file ...` | Delete one or more files. No undo. Files only; the firmware cannot remove directories. |
 | `trcp` | `trcp [drive:]/src [drive:]/dst` | Copy a file on the TR+ itself (no data crosses the network). Both paths must be on the same drive. Creates missing folders and overwrites the destination. A destination ending in `/` keeps the name. |
 | `trmv` | `trmv [drive:]/src [drive:]/dst` | Move or rename a file: copy on the TR+, confirm the copy's size, then delete the source. Same rules as `trcp`. Refuses to move a file onto itself. Not atomic, so an interrupted move can leave the file in both places. |
@@ -57,6 +57,7 @@ Examples:
 ./trls -l sd:/Demos
 ./trget "sd:/Demos/2 of 5 Swirler.prg"
 ./trput game.prg sd:/Games/
+./trput *.prg usb:
 cat notes.txt | ./trput - sd:/notes.txt
 ./trcp sd:/Games/game.prg sd:/Backup/
 ./trmv sd:/Games/game.prg sd:/Games/old/game.prg
