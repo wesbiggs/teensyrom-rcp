@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Show TeensyROM firmware version, Teensy temperature, machine type and boot state.
+
+usage: trstat [-H HOST[:PORT]]
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target, split_host, parse_int  # noqa: E402
+
+HOSTHELP = "host[:port] (required unless $TR_HOST is set; port defaults to 2112)"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-H", "--host", help=HOSTHELP)
+    a = ap.parse_args()
+    try:
+        with TR(*split_host(a.host)) as tr:
+            print(tr.version())
+            print(f"  Firmware mode: {tr.fw_check()}")
+    except TRError as e:
+        print(f"trstat: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

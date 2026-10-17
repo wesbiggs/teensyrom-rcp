@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Reset the C64 and return to the TeensyROM menu.
+
+usage: trreset [-w] [-H HOST[:PORT]]     -w waits until the menu reports Boot: complete
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target, split_host, parse_int  # noqa: E402
+
+HOSTHELP = "host[:port] (required unless $TR_HOST is set; port defaults to 2112)"
+
+import time
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-w", "--wait", action="store_true", help="wait for the menu to finish booting")
+    ap.add_argument("-H", "--host", help=HOSTHELP)
+    a = ap.parse_args()
+    host, port = split_host(a.host)
+    try:
+        with TR(host, port) as tr:
+            print(tr.reset())
+        if a.wait:
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                time.sleep(1)
+                try:
+                    with TR(host, port, timeout=3) as tr:
+                        if "Boot: complete" in tr.version():
+                            print("menu ready")
+                            return 0
+                except TRError:
+                    pass  # not listening yet during boot
+            print("trreset: timed out waiting for the menu", file=sys.stderr)
+            return 1
+    except TRError as e:
+        print(f"trreset: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

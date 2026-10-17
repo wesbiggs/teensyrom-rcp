@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Download a file from a TeensyROM+ SD card or USB drive over TCP.
+
+usage: trget [-H HOST[:PORT]] [drive:]/remote/path [local_path]     e.g. trget sd:/autolaunch.txt
+local_path defaults to the remote file name in the current directory; '-' writes to stdout.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("remote", help="[sd|usb:]/path/to/file")
+    ap.add_argument("local", nargs="?", help="destination file ('-' for stdout)")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    ap.add_argument("-f", "--force", action="store_true", help="overwrite existing local file")
+    args = ap.parse_args()
+
+    drive, path = parse_target(args.remote)
+    local = args.local or os.path.basename(path)
+
+    host, port = (args.host.rsplit(":", 1) + [None])[:2] if args.host else (None, None)
+    to_stdout = local == "-"
+    if not to_stdout and os.path.exists(local) and not args.force:
+        print(f"trget: {local} exists (use -f to overwrite)", file=sys.stderr)
+        return 1
+
+    tmp = None if to_stdout else local + ".part"
+    try:
+        with TR(host, port, timeout=15) as tr:
+            if to_stdout:
+                tr.get_file(drive, path, sys.stdout.buffer)
+            else:
+                with open(tmp, "wb") as f:
+                    n = tr.get_file(drive, path, f)
+                os.replace(tmp, local)
+                print(f"{local}: {n} bytes", file=sys.stderr)
+    except TRError as e:
+        print(f"trget: {e}", file=sys.stderr)
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

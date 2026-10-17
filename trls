@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""List a directory on a TeensyROM+ SD card or USB drive over TCP.
+
+usage: trls [-l] [-H HOST[:PORT]] [drive:]path     e.g. trls sd:/  or  trls -l usb:/games
+`tr:` lists the TR's own built-in menu. Firmware v0.8 stops sending that listing early over TCP
+(a firmware limitation), so it may fail; items are flat, with subfolder contents following the folder.
+Host comes from -H or $TR_HOST (required); the port defaults to 2112. Drive defaults to sd.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target, split_host  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("target", nargs="?", default="sd:/", help="[sd|usb|tr:]/path")
+    ap.add_argument("-l", "--long", action="store_true", help="show type and size")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    args = ap.parse_args()
+
+    drive, path = parse_target(args.target)
+    path = path.rstrip("/") or "/"
+
+    host, port = split_host(args.host)
+    try:
+        with TR(host, port) as tr:
+            entries = tr.list_all(drive, path)
+    except TRError as e:
+        print(f"trls: {e}", file=sys.stderr)
+        return 1
+
+    if drive != "tr":  # the menu listing is flat and order-dependent, so keep its order
+        entries = sorted(entries, key=lambda e: (e["type"] != "dir", e["name"].lower()))
+    for e in entries:
+        name = e["name"] + ("/" if e["type"] == "dir" else "")
+        if args.long:
+            size = "-" if e["type"] == "dir" else e.get("size", 0)
+            print(f"{e['type'][0]} {size:>10}  {name}")
+        else:
+            print(name)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

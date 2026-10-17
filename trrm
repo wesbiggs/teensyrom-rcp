@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Delete files from a TeensyROM+ SD card or USB drive over TCP.
+
+usage: trrm [-H HOST[:PORT]] [drive:]/remote/file ...     e.g. trrm sd:/Games/old.prg
+Deletes files only (not directories). There is no undo.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("remote", nargs="+", help="[sd|usb:]/path/to/file")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    args = ap.parse_args()
+
+    host, port = (args.host.rsplit(":", 1) + [None])[:2] if args.host else (None, None)
+    rc = 0
+    try:
+        with TR(host, port) as tr:
+            for r in args.remote:
+                drive, path = parse_target(r)
+                if path.endswith("/") or path == "/":
+                    print(f"trrm: {r}: refusing to delete a directory", file=sys.stderr)
+                    rc = 1
+                    continue
+                try:
+                    tr.delete_file(drive, path)
+                except TRError as e:
+                    print(f"trrm: {e}", file=sys.stderr)
+                    rc = 1
+                    # a failed command may leave the TR mid-state; reconnect for the next file
+                    tr.close()
+                    tr.__init__(host, port)
+    except TRError as e:
+        print(f"trrm: {e}", file=sys.stderr)
+        return 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

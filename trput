@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Upload a file to a TeensyROM+ SD card or USB drive over TCP.
+
+usage: trput [-f] [-H HOST[:PORT]] local_file [drive:]/remote/path     e.g. trput game.prg sd:/Games/
+A remote path ending in '/' (or '/' alone) keeps the local file name. Missing remote
+directories are created by the TR. The TR refuses to overwrite an existing file; -f deletes it first.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target  # noqa: E402
+
+
+def remote_exists(tr, drive, path):
+    parent, _, name = path.rpartition("/")
+    try:
+        entries = tr.list_all(drive, parent or "/")
+    except TRError:  # parent directory doesn't exist yet
+        tr.reconnect()
+        return False
+    return any(e.get("name") == name and e.get("type") != "dir" for e in entries)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("local", help="local file ('-' reads stdin; then remote must be a full file path)")
+    ap.add_argument("remote", help="[sd|usb:]/path/or/dir/")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    ap.add_argument("-f", "--force", action="store_true", help="delete an existing remote file first, then upload")
+    args = ap.parse_args()
+
+    drive, path = parse_target(args.remote)
+    if path.endswith("/"):
+        if args.local == "-":
+            print("trput: stdin needs a full remote file path", file=sys.stderr)
+            return 1
+        path += os.path.basename(args.local)
+
+    try:
+        data = sys.stdin.buffer.read() if args.local == "-" else open(args.local, "rb").read()
+    except OSError as e:
+        print(f"trput: {e}", file=sys.stderr)
+        return 1
+
+    host, port = (args.host.rsplit(":", 1) + [None])[:2] if args.host else (None, None)
+    try:
+        with TR(host, port, timeout=30) as tr:
+            if args.force and remote_exists(tr, drive, path):
+                tr.delete_file(drive, path)  # the TR refuses to write over an existing file
+            n = tr.put_file(drive, path, data)
+    except TRError as e:
+        print(f"trput: {e}", file=sys.stderr)
+        return 1
+    print(f"{drive}:{path}: {n} bytes", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

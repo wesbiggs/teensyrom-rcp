@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Dump the C64 text screen (40x25) to stdout as ASCII (TR+ only).
+
+usage: trscreendump [-a [-b]] [-c auto|upper|lower] [-H HOST[:PORT]]
+Fails if the VIC is in bitmap mode. Otherwise finds the screen RAM address from the VIC bank
+($DD00) and screen pointer ($D018), reads the 1000 bytes via DMA and converts screen codes to
+ASCII, one line per row with trailing spaces trimmed. Reverse video is shown as normal text; graphics characters become '#'. -c picks the character
+set used for letters. With -a the output is colored with ANSI 24-bit escapes using the C64
+palette: foreground from color RAM ($D800), background from $D021, with reverse-video cells
+swapped (the border and multicolor text mode are not shown). -b leaves out the background so
+the terminal's own shows through, and trailing spaces are trimmed again. The letter set: 'auto' (default) reads $D018, 'upper' is the power-on upper-case/graphics
+set, 'lower' is the lower/upper-case set.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host  # noqa: E402
+
+COLS, ROWS = 40, 25
+VIC_CTRL1 = 0xD011  # bit 5 set => bitmap mode
+BG_COLOR = 0xD021  # low nibble: background color
+COLOR_RAM = 0xD800
+PALETTE = [  # C64 colors 0-15 (Pepto)
+    (0x00, 0x00, 0x00), (0xFF, 0xFF, 0xFF), (0x68, 0x37, 0x2B), (0x70, 0xA4, 0xB2),
+    (0x6F, 0x3D, 0x86), (0x58, 0x8D, 0x43), (0x35, 0x28, 0x79), (0xB8, 0xC7, 0x6F),
+    (0x6F, 0x4F, 0x25), (0x43, 0x39, 0x00), (0x9A, 0x67, 0x59), (0x44, 0x44, 0x44),
+    (0x6C, 0x6C, 0x6C), (0x9A, 0xD2, 0x84), (0x6C, 0x5E, 0xB5), (0x95, 0x95, 0x95),
+]
+VIC_MEMCTL = 0xD018  # bits 4-7: screen offset in 1K units; bit 1 set => lower/upper-case set
+CIA2_PORTA = 0xDD00  # bits 0-1: VIC bank, inverted
+
+
+def to_ascii(code, lower):
+    code &= 0x7F  # drop reverse-video bit
+    if code == 0:
+        return "@"
+    if code < 27:
+        return chr(code + (96 if lower else 64))  # a-z or A-Z
+    if code < 32:
+        return "[\\]^_"[code - 27]  # £ and arrows have no ASCII equivalent
+    if code < 64:
+        return chr(code)
+    if lower and 65 <= code <= 90:
+        return chr(code)  # A-Z
+    return "#"  # graphics
+
+
+def sgr(fg, bg):
+    r, g, b = PALETTE[fg]
+    out = f"\x1b[38;2;{r};{g};{b}"
+    if bg is not None:
+        r, g, b = PALETTE[bg]
+        out += f";48;2;{r};{g};{b}"
+    return out + "m"
+
+
+def ansi_row(codes, colors, bg, lower, with_bg):
+    out, cur = [], None
+    for code, color in zip(codes, colors):
+        fg, cell_bg = color & 0x0F, bg
+        if code & 0x80:  # reverse video
+            fg, cell_bg = cell_bg, fg
+        style = (fg, cell_bg if with_bg else None)
+        if style != cur:
+            out.append(sgr(*style))
+            cur = style
+        out.append(to_ascii(code, lower))
+    line = "".join(out)
+    if not with_bg:
+        line = line.rstrip(" ")  # drop trailing spaces (an SGR may follow them)
+        line = line.rstrip()
+    return line + "\x1b[0m"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-c", "--charset", choices=["auto", "upper", "lower"], default="auto")
+    ap.add_argument("-a", "--ansi", action="store_true", help="color output with ANSI escapes")
+    ap.add_argument("-b", "--no-background", action="store_true", help="with -a: omit the background color")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    try:
+        with TR(*split_host(a.host)) as tr:
+            if tr.read_mem(VIC_CTRL1, 1)[0] & 0x20:
+                print("trscreendump: VIC is in bitmap mode; not a text screen", file=sys.stderr)
+                return 1
+            memctl = tr.read_mem(VIC_MEMCTL, 1)[0]
+            bank = 3 - (tr.read_mem(CIA2_PORTA, 1)[0] & 0x03)
+            addr = bank * 0x4000 + ((memctl >> 4) & 0x0F) * 0x400
+            if 0xD000 <= addr < 0xE000:
+                # The VIC sees RAM here, but DMA reads would return the I/O registers.
+                print(f"trscreendump: screen at ${addr:04x} is under I/O; can't read it", file=sys.stderr)
+                return 1
+            screen = tr.read_mem(addr, COLS * ROWS)
+            if a.ansi:
+                colors = tr.read_mem(COLOR_RAM, COLS * ROWS)
+                bg = tr.read_mem(BG_COLOR, 1)[0] & 0x0F
+            lower = bool(memctl & 0x02) if a.charset == "auto" else a.charset == "lower"
+    except TRError as e:
+        print(f"trscreendump: {e}", file=sys.stderr)
+        return 1
+    for r in range(ROWS):
+        if a.ansi:
+            sl = slice(r * COLS, (r + 1) * COLS)
+            print(ansi_row(screen[sl], colors[sl], bg, lower, not a.no_background))
+            continue
+        print("".join(to_ascii(c, lower) for c in screen[r * COLS:(r + 1) * COLS]).rstrip())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

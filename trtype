@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Type text on the C64 by filling its KERNAL keyboard buffer (TR+ only).
+
+usage: trtype [-r] [-s] [-n] [-H HOST[:PORT]] TEXT...      e.g. trtype -r 'load"*",8'
+TEXT is ASCII (use '-' to read stdin). Special keys go in braces: {F1}..{F8} {RETURN} {DEL}
+{INST} {HOME} {CLR} {UP} {DOWN} {LEFT} {RIGHT} {SPACE}, or a raw PETSCII code like {147}.
+Write {{ and }} for literal braces. A newline (or a typed \\n) is Return.
+By default letters of either case are sent as unshifted keys, so 'RUN' and 'run' both work as
+BASIC commands. With -s, upper-case letters are sent shifted (PETSCII 193-218), which gives
+mixed case in the lower/upper character set.
+Only programs that read keys through the KERNAL see the input; ones that scan the keyboard
+matrix directly do not. The buffer holds 10 keys, so longer text is sent in batches as the
+C64 consumes them.
+"""
+import argparse
+import os
+import re
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host  # noqa: E402
+
+KEYBUF = 0x0277  # 10-byte keyboard buffer
+KEYCOUNT = 0x00C6  # number of keys waiting
+BUFSIZE = 10
+
+KEYS = {
+    "F1": 133, "F3": 134, "F5": 135, "F7": 136, "F2": 137, "F4": 138, "F6": 139, "F8": 140,
+    "RETURN": 13, "RET": 13, "ENTER": 13, "DEL": 20, "INST": 148, "HOME": 19, "CLR": 147,
+    "UP": 145, "DOWN": 17, "LEFT": 157, "RIGHT": 29, "SPACE": 32,
+}
+PUNCT = {"[": 91, "]": 93, "\\": 92, "^": 94, "_": 95, "@": 64}
+
+
+def encode(text, shift_upper=False):
+    text = text.replace("\\n", "\n")
+    out, i = [], 0
+    while i < len(text):
+        c = text[i]
+        if c == "{":
+            if text.startswith("{{", i):
+                out.append(ord("{"))
+                i += 2
+                continue
+            m = re.match(r"\{([A-Za-z0-9]+)\}", text[i:])
+            if not m:
+                raise ValueError(f"bad key spec at: {text[i:i + 12]!r}")
+            name = m.group(1)
+            if name.isdigit() and 0 <= int(name) <= 255:
+                out.append(int(name))
+            elif name.upper() in KEYS:
+                out.append(KEYS[name.upper()])
+            else:
+                raise ValueError(f"unknown key {{{name}}}")
+            i += len(m.group(0))
+            continue
+        if c == "}":
+            if not text.startswith("}}", i):
+                raise ValueError("lone '}' (write '}}' for a literal brace)")
+            out.append(ord("}"))
+            i += 2
+            continue
+        i += 1
+        if c in "\n\r":
+            out.append(13)
+        elif c.isascii() and c.isalpha():
+            if c.isupper() and shift_upper:
+                out.append(ord(c) + 128)  # shifted letter, 193-218
+            else:
+                out.append(ord(c.upper()))  # unshifted key, 65-90
+        elif c in PUNCT:
+            out.append(PUNCT[c])
+        elif " " <= c <= "?":
+            out.append(ord(c))
+        else:
+            raise ValueError(f"can't type {c!r}")
+    return out
+
+
+def wait_empty(tr, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if tr.read_mem(KEYCOUNT, 1)[0] == 0:
+            return
+        time.sleep(0.03)
+    tr.write_mem(KEYCOUNT, b"\0")  # drop what is left
+    raise TRError("keyboard buffer is not draining (is a program reading keys via the KERNAL?)")
+
+
+def type_codes(tr, codes, timeout=5.0):
+    for i in range(0, len(codes), BUFSIZE):
+        batch = bytes(codes[i:i + BUFSIZE])
+        wait_empty(tr, timeout)
+        tr.write_mem(KEYBUF, batch)  # data first,
+        tr.write_mem(KEYCOUNT, bytes([len(batch)]))  # then the count
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("text", nargs="+")
+    ap.add_argument("-r", "--return", dest="ret", action="store_true", help="press Return at the end")
+    ap.add_argument("-s", "--shift-upper", action="store_true", help="send upper-case letters shifted")
+    ap.add_argument("-n", "--dry-run", action="store_true", help="print the PETSCII codes, send nothing")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    text = sys.stdin.read() if a.text == ["-"] else " ".join(a.text)
+    try:
+        codes = encode(text, a.shift_upper) + ([13] if a.ret else [])
+        if a.dry_run:
+            print(" ".join(map(str, codes)))
+            return 0
+        with TR(*split_host(a.host)) as tr:
+            type_codes(tr, codes)
+    except (ValueError, TRError) as e:
+        print(f"trtype: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

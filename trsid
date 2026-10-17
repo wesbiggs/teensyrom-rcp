@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Control SID playback on the TeensyROM+ (a SID must be loaded and playing at the menu).
+
+usage: trsid [-H HOST[:PORT]] pause
+       trsid [-H HOST[:PORT]] song N              select sub-song N (1-based)
+       trsid [-H HOST[:PORT]] speed [--log] PCT   playback speed; 0 = normal
+       trsid [-H HOST[:PORT]] mute [VOICE ...]    mute voices 1-3; no voices = unmute all
+Speed (linear, default): percent change from normal, -68 to just under 128; +25 plays 25%
+faster. With --log, PCT is the firmware's log-scale value, -127 to 99: +50 is double speed,
+-100 is half speed (the firmware's "SID playback speed-log.txt" lists the mapping).
+`pause` toggles pause/resume. The TR answers with a bare failure when no SID is playing.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("pause", help="pause/resume playback")
+    p = sub.add_parser("song", help="select sub-song (1-based)")
+    p.add_argument("number", type=int)
+    p = sub.add_parser("speed", help="set playback speed")
+    p.add_argument("percent", type=float)
+    p.add_argument("--log", action="store_true", help="log-scale value instead of linear percent")
+    p = sub.add_parser("mute", help="mute voices; none given = unmute all")
+    p.add_argument("voices", nargs="*", type=int)
+    a = ap.parse_args()
+    try:
+        with TR(*split_host(a.host)) as tr:
+            if a.cmd == "pause":
+                tr.sid_pause()
+            elif a.cmd == "song":
+                tr.sid_song(a.number)
+            elif a.cmd == "speed":
+                tr.sid_speed(a.percent, a.log)
+            else:
+                tr.sid_mute(a.voices)
+    except TRError as e:
+        print(f"trsid: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

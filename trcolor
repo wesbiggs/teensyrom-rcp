@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Set a color in the TeensyROM menu UI (saved in the TR's EEPROM; reset the menu to see it).
+
+usage: trcolor [-H HOST[:PORT]] ELEMENT COLOR      e.g. trcolor border ltblue
+ELEMENT: background border banner time option sources names   (or 0-6)
+COLOR:   black white red cyan purple green blue yellow orange brown ltred dkgrey grey
+         ltgreen ltblue ltgrey   (or 0-15, the C64 color numbers)
+Factory defaults: background black, border purple, banner purple, time orange, option yellow,
+sources ltblue, names ltgreen.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host, COLOR_REFS, COLOR_NAMES  # noqa: E402
+
+
+def lookup(value, names, what):
+    v = value.lower()
+    if v in names:
+        return names.index(v)
+    if v.isdigit() and int(v) < len(names):
+        return int(v)
+    raise ValueError(f"unknown {what} {value!r} (one of: {' '.join(names)})")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("element")
+    ap.add_argument("color")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    try:
+        ref = lookup(a.element, COLOR_REFS, "element")
+        color = lookup(a.color, COLOR_NAMES, "color")
+        with TR(*split_host(a.host)) as tr:
+            tr.set_color(ref, color)
+    except (ValueError, TRError) as e:
+        print(f"trcolor: {e}", file=sys.stderr)
+        return 1
+    print(f"{COLOR_REFS[ref]} = {COLOR_NAMES[color]} (reset the menu to see it)", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

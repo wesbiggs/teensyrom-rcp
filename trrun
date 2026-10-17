@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Launch a file (PRG, CRT, SID, ...) on the C64 from the TeensyROM+ SD or USB.
+
+usage: trrun [-H HOST[:PORT]] [drive:]/path/to/file     e.g. trrun sd:/Demos/foo.prg
+drive is sd, usb or tr (the TR's built-in menu, e.g. trrun tr:/Games/name). For .sid files it
+waits up to 3 s for the TR's SID header verdict and fails if the header is bad.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target, split_host, parse_int  # noqa: E402
+
+HOSTHELP = "host[:port] (required unless $TR_HOST is set; port defaults to 2112)"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("remote")
+    ap.add_argument("-H", "--host", help=HOSTHELP)
+    a = ap.parse_args()
+    drive, path = parse_target(a.remote)
+    try:
+        with TR(*split_host(a.host)) as tr:
+            sid = tr.launch(drive, path)
+    except TRError as e:
+        print(f"trrun: {e}", file=sys.stderr)
+        return 1
+    if sid == "bad":
+        print(f"trrun: {drive}:{path}: the TR reports a bad SID header", file=sys.stderr)
+        return 1
+    print(f"launched {drive}:{path}" + (" (SID header ok)" if sid == "good" else ""), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Live C64 text screen with keyboard passthrough (TR+ only).
+
+usage: trmon [-t SECONDS] [-b] [-s] [--hb N] [--vb N] [-g] [-c auto|upper|lower] [-H HOST[:PORT]]
+Repeats: draw the screen as trscreendump -a does, then wait up to SECONDS (default 0.5) for a
+key on this terminal. A key is typed on the C64 as trtype would (arrows, Return, Backspace=DEL,
+Home, F1-F8 are mapped) and the screen is redrawn at once; on timeout it is just redrawn.
+Ctrl-C breaks a running BASIC program (see stop()), Ctrl-R resets the C64 as trreset does.
+Quit with Ctrl-].
+--hb N adds N border columns left and right of the screen (horizontal), --vb N adds N border
+rows above and below (vertical), drawn in the border color ($D020). Both default to 0 (no border).
+-g shows every character as its C64 Pro Mono glyph (needs that font in the terminal).
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, here)
+from trlib import TR, TRError, split_host  # noqa: E402
+
+class ScreenError(TRError):
+    """The C64 is in a state we can't show; the connection itself is fine."""
+
+
+def _load(name):
+    path = os.path.join(here, name)
+    loader = importlib.machinery.SourceFileLoader(name + "_mod", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+trtype = _load("trtype")
+encode, type_codes = trtype.encode, trtype.type_codes
+
+BORDER_COLOR = 0xD020  # low nibble: border color
+QUIT = b"\x1d"  # Ctrl-]
+INTR = b"\x03"  # Ctrl-C
+RESET = b"\x12"  # Ctrl-R
+ISTOP, STUB = 0x0328, 0x033C  # KERNAL STOP-check vector; cassette buffer, used for a stub
+# LDA #$7F / STA $91 / JMP $F6ED: the normal STOP check, but as if RUN/STOP were held down
+STUB_CODE = bytes([0xA9, 0x7F, 0x85, 0x91, 0x4C, 0xED, 0xF6])
+
+
+def stop(tr, hold=0.2):
+    """Press RUN/STOP for a moment. $91 is rewritten by every keyboard-scan IRQ, so instead
+    point the STOP vector at a stub that reports the key down, then put the vector back."""
+    tr.write_mem(STUB, STUB_CODE)
+    tr.write_mem(ISTOP, bytes([STUB & 0xFF, STUB >> 8]))
+    time.sleep(hold)
+    tr.write_mem(ISTOP, bytes([0xED, 0xF6]))
+
+ESC_KEYS = {  # terminal escape sequences -> PETSCII codes
+    b"\x1b[A": 145, b"\x1b[B": 17, b"\x1b[C": 29, b"\x1b[D": 157,
+    b"\x1b[H": 19, b"\x1b[1~": 19, b"\x1b[3~": 20, b"\x1b[2~": 148, b"\x1b[F": 147,
+    b"\x1bOP": 133, b"\x1bOQ": 137, b"\x1bOR": 134, b"\x1bOS": 138,
+    b"\x1b[15~": 135, b"\x1b[17~": 139, b"\x1b[18~": 136, b"\x1b[19~": 140,
+}
+
+
+def keys_to_codes(data, shift_upper):
+    """Translate raw terminal input bytes to PETSCII codes (unmappable keys are dropped)."""
+    codes, i = [], 0
+    while i < len(data):
+        if data[i] == 0x1B:
+            for seq, code in ESC_KEYS.items():
+                if data.startswith(seq, i):
+                    codes.append(code)
+                    i += len(seq)
+                    break
+            else:
+                i += len(data) - i  # unknown escape sequence: drop the rest
+            continue
+        b = data[i]
+        i += 1
+        if b in (0x7F, 0x08):
+            codes.append(20)  # DEL
+        elif b in (0x0D, 0x0A):
+            codes.append(13)
+        elif 0x20 <= b < 0x7F:
+            c = chr(b)
+            if c in "{}":
+                c += c
+            try:
+                codes.extend(encode(c, shift_upper))
+            except ValueError:
+                pass
+    return codes
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-t", "--timeout", type=float, default=0.5, help="seconds to wait for a key (default 0.5)")
+    ap.add_argument("-b", "--no-background", action="store_true", help="omit the background color")
+    ap.add_argument("-s", "--shift-upper", action="store_true", help="send upper-case letters shifted")
+    ap.add_argument("--hb", type=int, default=0, metavar="N", help="border columns left and right (default 0)")
+    ap.add_argument("--vb", type=int, default=0, metavar="N", help="border rows above and below (default 0)")
+    ap.add_argument("-g", "--glyphs", action="store_true",
+                    help="use the C64 Pro Mono private-use glyphs (U+EE00/U+EF00) for every character")
+    ap.add_argument("-c", "--charset", choices=["auto", "upper", "lower"], default="auto")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    if a.hb < 0 or a.vb < 0:
+        ap.error("--hb and --vb must not be negative")
+    if not sys.stdin.isatty():
+        print("trmon: stdin must be a terminal", file=sys.stderr)
+        return 1
+
+    dump = _load("trscreendump")
+    if a.glyphs:
+        # C64 Pro Mono maps screen code N to U+EE00+N (upper-case/graphics set) or U+EF00+N
+        # (lower/upper-case set); ansi_row still swaps colors for reverse video
+        dump.to_ascii = lambda code, lower: chr(0xEE00 + (0x100 if lower else 0) + (code & 0x7F))
+
+    def snapshot(tr):
+        if tr.read_mem(dump.VIC_CTRL1, 1)[0] & 0x20:
+            raise ScreenError("VIC is in bitmap mode; not a text screen")
+        memctl = tr.read_mem(dump.VIC_MEMCTL, 1)[0]
+        bank = 3 - (tr.read_mem(dump.CIA2_PORTA, 1)[0] & 0x03)
+        addr = bank * 0x4000 + ((memctl >> 4) & 0x0F) * 0x400
+        if 0xD000 <= addr < 0xE000:
+            raise ScreenError(f"screen at ${addr:04x} is under I/O; can't read it")
+        n = dump.COLS * dump.ROWS
+        screen = tr.read_mem(addr, n)
+        colors = tr.read_mem(dump.COLOR_RAM, n)
+        bg = tr.read_mem(dump.BG_COLOR, 1)[0] & 0x0F
+        lower = bool(memctl & 0x02) if a.charset == "auto" else a.charset == "lower"
+        rows = []
+        for r in range(dump.ROWS):
+            sl = slice(r * dump.COLS, (r + 1) * dump.COLS)
+            rows.append(dump.ansi_row(screen[sl], colors[sl], bg, lower, not a.no_background))
+        if a.hb or a.vb:
+            rows = add_border(rows, tr.read_mem(BORDER_COLOR, 1)[0] & 0x0F)
+        return rows
+
+    def add_border(rows, color):
+        r, g, b = dump.PALETTE[color]
+        block = lambda n: f"\x1b[48;2;{r};{g};{b}m{' ' * n}\x1b[0m"
+        edge = block(dump.COLS + 2 * a.hb)
+        out = [edge] * a.vb
+        for row in rows:
+            # clear to end of line first (rows may be trimmed), then place the right edge by column
+            out.append(block(a.hb) + row + "\x1b[0m\x1b[K" + f"\x1b[{a.hb + dump.COLS + 1}G" + block(a.hb))
+        return out + [edge] * a.vb
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    out = sys.stdout
+    try:
+        with TR(*split_host(a.host)) as tr:
+            tty.setraw(fd)
+            out.write("\x1b[?1049h\x1b[?25l\x1b[2J")  # alternate screen, hide cursor
+            broken = False  # connection suspect (after a reset or a bad reply): reconnect first
+            while True:
+                rows = None
+                for attempt in range(2):
+                    try:
+                        if broken:
+                            tr.reconnect()
+                            broken = False
+                        rows = snapshot(tr)
+                        break
+                    except ScreenError as e:
+                        rows = [str(e)]
+                        break
+                    except (TRError, OSError) as e:
+                        # e.g. "unexpected reply": the reply stream is out of step, so start over
+                        broken = True
+                        rows = [str(e)]
+                # raw mode: need explicit CR; erase to end of line so shorter rows leave no
+                # residue; no newline after the last row so the frame is exactly 40x25
+                frame = "\x1b[H" + "\r\n".join(r + "\x1b[K" for r in rows) + "\x1b[0m\x1b[J"
+                out.write(frame)
+                out.flush()
+                if not select.select([fd], [], [], a.timeout)[0]:
+                    continue
+                data = os.read(fd, 64)
+                if QUIT in data:
+                    break
+                if RESET in data:
+                    try:
+                        tr.reset()
+                    except (TRError, OSError):
+                        pass  # the connection may drop as the C64 resets
+                    broken = True
+                    continue
+                codes = keys_to_codes(data.replace(INTR, b""), a.shift_upper)
+                if codes or INTR in data:
+                    try:
+                        if INTR in data:
+                            stop(tr)
+                        type_codes(tr, codes, timeout=1.0)
+                    except (TRError, OSError):
+                        broken = True  # reconnect before the next redraw
+    except TRError as e:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        print(f"trmon: {e}", file=sys.stderr)
+        return 1
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        out.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+        out.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

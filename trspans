@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Write several C64 memory regions in one DMA job, in slices (TR+ only).
+
+usage: trspans [-s SLICE] [-g GAP] [-H HOST[:PORT]] SPAN [SPAN ...]
+SPAN is ADDR:FILE (file contents) or ADDR=b1,b2,... (byte values); numbers are 1024, 0x400 or $400.
+  trspans -s 100 -g 40 0x0400:screen.bin 0xd800:color.bin 0xd020=2,0
+Up to 64 spans, 64 KiB total, 1024 slices; none may touch $DE00-$DFFF.
+Each DMA moves at most SLICE bytes (0 = whole span, max 255) and the 6510 runs for GAP
+microseconds (0-255) between slices. Use this instead of trpoke for large updates while
+interrupt-driven code runs: size SLICE about 100 bytes under the interval the C64 can't be
+halted for, with a GAP of at least 20 us. Smaller slices and longer gaps are slower.
+Needs firmware with span support (v0.8.0.13 or newer per the protocol notes).
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host, parse_int  # noqa: E402
+
+
+def parse_span(spec):
+    for sep in (":", "="):
+        addr, found, rest = spec.partition(sep)
+        if found:
+            break
+    else:
+        raise ValueError(f"span {spec!r} needs ADDR:FILE or ADDR=bytes")
+    addr = parse_int(addr)
+    if sep == ":":
+        with open(rest, "rb") as f:
+            data = f.read()
+    else:
+        data = bytes(parse_int(b) for b in rest.split(",") if b.strip())
+    return addr, data
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("spans", nargs="+")
+    ap.add_argument("-s", "--slice", type=int, default=0, help="max bytes per DMA slice (0 = whole span)")
+    ap.add_argument("-g", "--gap", type=int, default=0, help="microseconds the C64 runs between slices")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    try:
+        spans = [parse_span(s) for s in a.spans]
+        with TR(*split_host(a.host)) as tr:
+            tr.write_spans(spans, a.slice, a.gap)
+    except (ValueError, OSError, TRError) as e:
+        print(f"trspans: {e}", file=sys.stderr)
+        return 1
+    print(f"wrote {len(spans)} spans, {sum(len(d) for _, d in spans)} bytes", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

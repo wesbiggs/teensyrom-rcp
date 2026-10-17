@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Save the C64 bitmap screen as a Koala (multicolor) or Art Studio (hires) file (TR+ only).
+
+usage: trscreenshot [-o FILE] [--png FILE] [-s SCALE] [-f] [-p] [-H HOST[:PORT]]
+Reads the VIC registers to find the mode: multicolor bitmap -> Koala (.kla, 10003 bytes, load
+address $6000); hires bitmap -> Art Studio (.art, 9002 bytes, load address $2000). Fails in
+text mode (use trscreendump) and for extended-color bitmap. The file defaults to
+screenshot.kla / screenshot.art and is not overwritten without -f; -o - writes to stdout.
+--png FILE also writes the picture as a PNG (scaled by -s, default 3; see trpng).
+-p pauses the C64 during the capture so the picture can't change mid-read.
+Limits: the DMA read sees what the CPU sees, so a bitmap or screen that sits under ROM
+($A000-$BFFF BASIC, $E000-$FFFF KERNAL) may read as ROM, which is warned about; one under I/O
+($D000-$DFFF) is refused. FLI, interlace and raster tricks are captured as a single frame state.
+"""
+import argparse
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host  # noqa: E402
+import c64img  # noqa: E402
+
+VIC_CTRL1, VIC_CTRL2, VIC_MEMCTL, BG_COLOR = 0xD011, 0xD016, 0xD018, 0xD021
+CIA2_PORTA, COLOR_RAM = 0xDD00, 0xD800
+
+
+def reg(tr, addr):
+    return tr.read_mem(addr, 1)[0]
+
+
+def capture(tr, warn):
+    ctrl1, ctrl2 = reg(tr, VIC_CTRL1), reg(tr, VIC_CTRL2)
+    if not ctrl1 & 0x20:
+        raise TRError("VIC is in text mode, not bitmap mode (use trscreendump)")
+    if ctrl1 & 0x40:
+        raise TRError("extended-color bitmap mode is not a valid picture mode")
+    multicolor = bool(ctrl2 & 0x10)
+    memctl = reg(tr, VIC_MEMCTL)
+    bank = (3 - (reg(tr, CIA2_PORTA) & 0x03)) * 0x4000
+    bitmap = bank + (0x2000 if memctl & 0x08 else 0)
+    screen = bank + ((memctl >> 4) & 0x0F) * 0x400
+
+    if bank in (0x0000, 0x8000) and bitmap == bank:
+        raise TRError(f"bitmap at ${bitmap:04x}: the VIC sees character ROM at +$1000, can't capture")
+    for name, start, size in (("bitmap", bitmap, 8000), ("screen", screen, 1000)):
+        end = start + size
+        if start < 0xE000 and end > 0xD000:
+            raise TRError(f"{name} at ${start:04x} is under I/O; can't read it")
+        if (start < 0xC000 and end > 0xA000) or end > 0xE000:
+            warn(f"{name} at ${start:04x} overlaps ROM space; data may be ROM, not the picture")
+
+    data = tr.read_mem(bitmap, 8000) + tr.read_mem(screen, 1000)
+    if multicolor:
+        colors = bytes(b & 0x0F for b in tr.read_mem(COLOR_RAM, 1000))
+        return "kla", b"\x00\x60" + data + colors + bytes([reg(tr, BG_COLOR) & 0x0F]), bitmap, screen
+    return "art", b"\x00\x20" + data, bitmap, screen
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-o", "--output", help="output file ('-' for stdout)")
+    ap.add_argument("--png", metavar="FILE", help="also write a PNG of the picture")
+    ap.add_argument("-s", "--scale", type=int, default=3, help="PNG pixel scale (default 3)")
+    ap.add_argument("-f", "--force", action="store_true", help="overwrite an existing file")
+    ap.add_argument("-p", "--pause", action="store_true", help="pause the C64 during the capture")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    warn = lambda m: print(f"trscreenshot: warning: {m}", file=sys.stderr)  # noqa: E731
+    paused = False
+    try:
+        with TR(*split_host(a.host)) as tr:
+            try:
+                if a.pause:
+                    tr.pause(True)
+                    paused = True
+                    time.sleep(0.1)
+                kind, data, bitmap, screen = capture(tr, warn)
+            finally:
+                if paused:
+                    try:
+                        tr.pause(False)
+                    except TRError:
+                        tr.reconnect()
+                        tr.pause(False)
+    except TRError as e:
+        print(f"trscreenshot: {e}", file=sys.stderr)
+        return 1
+    if a.png and os.path.exists(a.png) and not a.force:
+        print(f"trscreenshot: {a.png} exists (use -f to overwrite)", file=sys.stderr)
+        return 1
+    out = a.output or f"screenshot.{kind}"
+    if out == "-":
+        sys.stdout.buffer.write(data)
+    else:
+        if os.path.exists(out) and not a.force:
+            print(f"trscreenshot: {out} exists (use -f to overwrite)", file=sys.stderr)
+            return 1
+        with open(out, "wb") as f:
+            f.write(data)
+        mode = "multicolor (Koala)" if kind == "kla" else "hires (Art Studio)"
+        print(f"{out}: {len(data)} bytes, {mode}, bitmap ${bitmap:04x}, screen ${screen:04x}", file=sys.stderr)
+    if a.png:
+        c64img.write_png(a.png, c64img.decode(kind, data), max(1, a.scale))
+        print(f"{a.png}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

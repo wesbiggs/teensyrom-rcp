@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Read C64 memory via DMA (TR+ only); hex dump by default.
+
+usage: trpeek [-o FILE] [-H HOST[:PORT]] ADDR [LEN]     ADDR/LEN: 1024, 0x400 or $400; LEN defaults to 256
+-o FILE writes the raw bytes to FILE ("-" for stdout) instead of a hex dump.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target, split_host, parse_int  # noqa: E402
+
+HOSTHELP = "host[:port] (required unless $TR_HOST is set; port defaults to 2112)"
+
+
+def hexdump(addr, data):
+    for i in range(0, len(data), 16):
+        row = data[i:i + 16]
+        hx = " ".join(f"{b:02x}" for b in row)
+        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+        print(f"{addr + i:04x}  {hx:<47}  {asc}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("addr")
+    ap.add_argument("length", nargs="?", default="256")
+    ap.add_argument("-o", "--output")
+    ap.add_argument("-H", "--host", help=HOSTHELP)
+    a = ap.parse_args()
+    try:
+        addr, length = parse_int(a.addr), parse_int(a.length)
+        with TR(*split_host(a.host)) as tr:
+            data = tr.read_mem(addr, length)
+    except (ValueError, TRError) as e:
+        print(f"trpeek: {e}", file=sys.stderr)
+        return 1
+    if a.output == "-":
+        sys.stdout.buffer.write(data)
+    elif a.output:
+        with open(a.output, "wb") as f:
+            f.write(data)
+    else:
+        hexdump(addr, data)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

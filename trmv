@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Move/rename a file on the TeensyROM+ (copy on the TR, verify size, then delete the source).
+
+usage: trmv [-H HOST[:PORT]] [drive:]/src [drive:]/dst     e.g. trmv sd:/a.prg sd:/Games/b.prg
+Both paths must be on the same drive. Missing destination folders are created; an existing
+destination is overwritten. A destination ending in / keeps the file name. Files only.
+The TR has no atomic rename, so an interrupted move can leave the file in both places;
+the source is only deleted after the copy's size is confirmed.
+"""
+import argparse
+import posixpath
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, parse_target, split_host  # noqa: E402
+
+
+def file_size(tr, drive, path):
+    parent, name = posixpath.split(path)
+    for e in tr.list_all(drive, parent or "/"):
+        if e["name"] == name and e["type"] == "file":
+            return e["size"]
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("src")
+    ap.add_argument("dst")
+    ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
+    a = ap.parse_args()
+    d1, src = parse_target(a.src)
+    d2, dst = parse_target(a.dst, default_drive=d1)
+    if d1 != d2:
+        print("trmv: source and destination must be on the same drive", file=sys.stderr)
+        return 1
+    if src.endswith("/"):
+        print("trmv: moving directories is not supported", file=sys.stderr)
+        return 1
+    if dst.endswith("/"):
+        dst += posixpath.basename(src)
+    if posixpath.normpath(src).lower() == posixpath.normpath(dst).lower():
+        print("trmv: source and destination are the same file", file=sys.stderr)
+        return 1  # the TR deletes the destination before copying, which would destroy it
+    try:
+        with TR(*split_host(a.host)) as tr:
+            want = file_size(tr, d1, src)
+            if want is None:
+                print(f"trmv: {d1}:{src}: no such file", file=sys.stderr)
+                return 1
+            tr.copy_file(d1, src, dst)
+            got = file_size(tr, d1, dst)
+            if got != want:
+                print(f"trmv: copy size mismatch ({got} vs {want}); source left in place", file=sys.stderr)
+                return 1
+            tr.delete_file(d1, src)
+    except TRError as e:
+        print(f"trmv: {e}", file=sys.stderr)
+        return 1
+    print(f"{d1}:{src} -> {d1}:{dst}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
