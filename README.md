@@ -1,12 +1,12 @@
-# teensyio
+# teensyrom-rcp
 
-Small command-line tools for reading and writing a TeensyROM+ (TR+) SD card and USB drive, and for controlling the attached C64, over TCP. Python 3, standard library only.
+Small command-line tools for reading and writing a TeensyROM+ (TR+) SD card and USB drive, and for controlling the attached C64, over TCP. Requires Python 3, standard library only.
 
 They speak the [TeensyROM remote command protocol](https://github.com/SensoriumEmbedded/TeensyROM/blob/main/docs/ControlComms.md) on port 2112.
 
 ## Setup
 
-1. On the TR+, set **Enable TCP Listener** to **On**.
+1. On the TR+, open `TeensyROM Settings Menu` and set **Enable TCP Listener** to **On** (under `Config: Startup Options`, type `b`).
 2. Tell the tools where the TR+ is. There is **no default host**: every command that talks to the TR+ fails with `No TR_HOST value set or --host specified` unless you give one of:
 
    | Setting | How | Default |
@@ -32,7 +32,7 @@ They speak the [TeensyROM remote command protocol](https://github.com/SensoriumE
 
 ## Paths
 
-Remote paths look like `[drive:]/path/to/file`, where `drive` is `sd` or `usb`. The drive defaults to `sd`. `tr:` (the TR's own built-in menu items) is also accepted by `trls` and `trrun` only. Paths may be up to 357 bytes.
+Remote paths look like `[drive:]/path/to/file`, where `drive` is `sd` or `usb`. The drive defaults to `sd`. `tr:` (the TR's own built-in menu items) is also accepted by `trrun` only. Paths may be up to 357 bytes.
 
 Numbers for `trpeek` and `trpoke` accept decimal (`1024`, `53280`), hex (`0x400`) or C64-style hex (`$400`). Plain digits are always decimal, so `0400` means 400.
 
@@ -44,7 +44,7 @@ All commands exit 0 on success and 1 on any error, printing a message to stderr.
 
 | Command | Usage | Description |
 |---|---|---|
-| `trls` | `trls [-l] [drive:]path` | List a directory. Directories first, then files, sorted by name. `-l` adds type and size. The firmware filters some hidden entries, but not all: on a USB stick formatted by macOS, `.Spotlight-V100`, `.Trashes` and `._` files were listed. Large directories are fetched in pages of 200. `trls tr:/` lists the TR's built-in menu, but firmware v0.8 stops sending that listing after about 100 bytes over TCP, so it currently fails with an explanatory error; the items come flat, with a folder's contents following the folder. |
+| `trls` | `trls [-l] [drive:]path` | List a directory. Directories first, then files, sorted by name. `-l` adds type and size. Large directories are fetched in pages of 200. |
 | `trget` | `trget [-f] [drive:]/file [local]` | Download a file. The local name defaults to the remote file name; `-` writes to stdout. Verifies the 16-bit checksum, writes to `<name>.part` and renames on success. Refuses to overwrite a local file unless `-f`. |
 | `trput` | `trput [-f] local [drive:]/dest` | Upload a file. A destination ending in `/` keeps the local name; `-` as the local file reads stdin (then give a full remote path). Missing folders are created. The TR refuses to write over an existing file ("File already exists"); `-f` deletes the old one first, so the replacement is not atomic. The TR verifies the checksum. |
 | `trrm` | `trrm [drive:]/file ...` | Delete one or more files. No undo. Files only; the firmware cannot remove directories. |
@@ -83,14 +83,12 @@ cat notes.txt | ./trput - sd:/notes.txt
 | `trspans` | `trspans [-s slice] [-g gap] span...` | Write up to 64 memory regions in one DMA job (TR+ only). A span is `ADDR:FILE` or `ADDR=b1,b2,...`. Each DMA moves at most `-s` bytes (0 = whole span, max 255) and the C64 runs for `-g` microseconds (0-255) between slices, so interrupt-driven code isn't starved; smaller slices and longer gaps are gentler but slower. Limits: 64 KiB total, 1024 slices, nothing in `$DE00`-`$DFFF`. Refused while REU emulation runs or the C64 is paused. Needs span-capable firmware (older firmware answers `Unk cmd`). |
 | `trscreendump` | `trscreendump [-a [-b]] [-c auto\|upper\|lower]` | Print the 40x25 text screen as ASCII, one line per row with trailing spaces trimmed. Fails if the VIC is in bitmap mode (`$D011`). Finds the screen address from the VIC bank (`$DD00`) and screen pointer (`$D018`). Reverse video is shown as normal text, graphics characters become `#`, and `£`/arrows become `[ \ ] ^ _`. `-c` picks the letter set; the default `auto` reads `$D018`. Refuses a screen located under I/O (`$D000`-`$DFFF`). `-a` adds color as 24-bit ANSI escapes in the C64 palette: foreground from color RAM (`$D800`), background from `$D021`, reverse-video cells swapped; `-b` omits the background. The border and multicolor text mode are not shown. |
 | `trscreenshot` | `trscreenshot [-o file] [--png file] [-s n] [-f] [-p]` | Save the C64 bitmap screen as a file. Reads the VIC registers to find the mode and addresses: multicolor bitmap writes a Koala `.kla` (10003 bytes, load address `$6000`), hires bitmap writes an Art Studio `.art` (9002 bytes, load address `$2000`). Fails in text mode (use `trscreendump`) and in extended-color bitmap mode. The file defaults to `screenshot.kla`/`screenshot.art` and is not overwritten without `-f`; `-o -` writes to stdout. `--png file` also writes a PNG of the picture, scaled by `-s` (default 3). `-p` pauses the C64 during the capture. A bitmap or screen under I/O (`$D000`-`$DFFF`) is refused; one overlapping BASIC/KERNAL ROM space gets a warning, because DMA may read the ROM instead of the RAM the VIC sees. FLI, interlace and raster tricks are not captured. |
-| `trpng` | `trpng [-s n] [-f] file [out.png]` | Convert a Koala `.kla` or Art Studio `.art` file to a PNG (default scale 3, so 960x600), using the Pepto C64 palette. Format is taken from the extension, load address or size; works with or without the 2-byte load address. Runs locally and needs no TR+. |
 | `trtype` | `trtype [-r] [-s] [-n] text...` | Type on the C64 by filling the KERNAL keyboard buffer (`$0277`, count at `$C6`). Special keys in braces: `{F1}`-`{F8}`, `{RETURN}`, `{DEL}`, `{INST}`, `{HOME}`, `{CLR}`, `{UP}`, `{DOWN}`, `{LEFT}`, `{RIGHT}`, `{SPACE}`, or a raw PETSCII code such as `{147}`; `{{` and `}}` are literal braces; a newline is Return. `-r` presses Return at the end, `-s` sends upper-case letters shifted (default: all letters as unshifted keys, so `RUN` and `run` both work), `-n` prints the PETSCII codes without sending. Sends 10 keys at a time, waiting for the C64 to consume them. Only works for programs that read keys through the KERNAL. |
 
 ```bash
 ./trscreendump > screen.txt
 ./trscreendump -a           # colored, for a truecolor terminal
 ./trscreenshot -p -o pic.kla --png pic.png   # capture a graphics screen
-./trpng pic.kla && open pic.png              # view a saved picture
 ./trtype -r 'load"*",8'     # then {F1}.. for function keys
 ./trpeek '$0400' 64          # quote $ so the shell doesn't expand it
 ./trpoke 0xd020 2            # red border
@@ -98,6 +96,44 @@ cat notes.txt | ./trput - sd:/notes.txt
 ```
 
 Ranges must fit within `$0000`-`$FFFF`. Writes are sent in 4 KB chunks; reads in 256-byte chunks. The TR+ occasionally fails to answer a read, so `trpeek` and `trscreendump` retry a timed-out chunk on a new connection (up to 4 attempts).
+
+### Live monitor (TR+ only)
+
+`trmon [-t SECONDS] [-d SECONDS] [-b] [-s] [--hb N] [--vb N] [-g] [-c auto|upper|lower]` shows the C64's 40x25 text screen live in your terminal and passes your keystrokes through to the C64. It redraws the screen as `trscreendump -a` does (truecolor, so use a terminal that supports it), then waits up to `-t` seconds (default 0.5) for a key. A key is typed on the C64 as `trtype` would, and the screen is redrawn at once; on timeout it is just redrawn. It needs a real terminal on stdin.
+
+| Key | Effect |
+|---|---|
+| Letters, digits, punctuation | Typed on the C64 (`-s` sends upper-case letters shifted) |
+| Arrows | Cursor keys |
+| Home, End | HOME, CLR |
+| Delete, Backspace | DEL |
+| Insert | INST |
+| Return | RETURN |
+| F1-F8 | C64 function keys |
+| Ctrl-C | Breaks a running BASIC program, as RUN/STOP would: it briefly points the KERNAL STOP vector at a stub that reports the key as held |
+| Ctrl-R | Resets the C64, as `trreset` does, and reconnects |
+| Ctrl-J | Sends RETURN, drops the TCP connection at once, waits `-d` seconds (default 1), then reconnects. Meant for launching a PRG from the TR menu, which the TR+ may not do while a client is connected. Most terminals send Ctrl-Return as Ctrl-J (LF), so use Ctrl-J if Ctrl-Return does nothing |
+| Ctrl-\, then a key | Like Ctrl-Return, but sends that key instead of RETURN, then drops the connection, waits `-d` seconds and reconnects. Any key `trmon` can send works, including letters, arrows and F1-F8. A key that can't be mapped cancels it |
+| Ctrl-] | Quit |
+
+`-d SECONDS` sets how long Ctrl-Return stays disconnected (default 1). Launching CCGMS worked at 0.25 s but not at 0 or 0.1 s, so 1 s leaves some margin.
+
+Options: `-b` omits the background color, `--hb N` and `--vb N` add N border columns or rows around the screen in the border color (`$D020`), `-g` shows every character as its C64 Pro Mono glyph (needs that font in your terminal), and `-c` forces the upper or lower character set instead of reading it from the VIC.
+
+If the screen can't be shown (the VIC is in bitmap mode, or the screen sits under I/O), `trmon` displays the reason in place of the screen and keeps going. After a bad reply or a reset it reconnects on its own. Keyboard input uses the KERNAL keyboard buffer, so it only works while the C64 is running something that reads the keyboard through the KERNAL.
+
+**Warning:** `trmon` doesn't play well with the TR+ launching programs, possibly because the necessary PEEKs steal too many cycles. Exit `trmon` and use `trrun` instead, or try `Ctrl-J` or `Ctrl-\ <key>` with the `-d` option as noted above.
+
+### Utilities
+
+| Command | Usage | Description |
+|---|---|---|
+| `trpng` | `trpng [-s n] [-f] file [out.png]` | Convert a Koala `.kla` or Art Studio `.art` file to a PNG (default scale 3, so 960x600), using the Pepto C64 palette. Format is taken from the extension, load address or size; works with or without the 2-byte load address. Runs locally and needs no TR+. |
+
+```bash
+./trpng pic.kla             # output goes to pic.png
+./trpng pic.art mypic.png
+```
 
 ## Library
 

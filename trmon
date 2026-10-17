@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Live C64 text screen with keyboard passthrough (TR+ only).
 
-usage: trmon [-t SECONDS] [-b] [-s] [--hb N] [--vb N] [-g] [-c auto|upper|lower] [-H HOST[:PORT]]
+usage: trmon [-t SECONDS] [-d SECONDS] [-b] [-s] [--hb N] [--vb N] [-g] [-c auto|upper|lower] [-H HOST[:PORT]]
 Repeats: draw the screen as trscreendump -a does, then wait up to SECONDS (default 0.5) for a
 key on this terminal. A key is typed on the C64 as trtype would (arrows, Return, Backspace=DEL,
 Home, F1-F8 are mapped) and the screen is redrawn at once; on timeout it is just redrawn.
 Ctrl-C breaks a running BASIC program (see stop()), Ctrl-R resets the C64 as trreset does.
+Ctrl-Return sends Return, drops the TCP connection at once, waits -d SECONDS (default 1), then reconnects (for
+when the TR won't launch a PRG while a client is connected). Terminals send Ctrl-Return as
+LF (Ctrl-J) or as an extended key sequence, so Ctrl-J works everywhere. Ctrl-Backslash followed by any
+key does the same with that key instead of Return (arrows and F1-F8 included).
 Quit with Ctrl-].
 --hb N adds N border columns left and right of the screen (horizontal), --vb N adds N border
 rows above and below (vertical), drawn in the border color ($D020). Both default to 0 (no border).
@@ -45,6 +49,9 @@ BORDER_COLOR = 0xD020  # low nibble: border color
 QUIT = b"\x1d"  # Ctrl-]
 INTR = b"\x03"  # Ctrl-C
 RESET = b"\x12"  # Ctrl-R
+PREFIX = b"\x1c"  # Ctrl-\
+# Ctrl-Return: LF (Ctrl-J; plain Return is CR in raw mode), CSI-u, xterm modifyOtherKeys
+RETURN_DISCONNECT = (b"\n", b"\x1b[13;5u", b"\x1b[27;5;13~")
 ISTOP, STUB = 0x0328, 0x033C  # KERNAL STOP-check vector; cassette buffer, used for a stub
 # LDA #$7F / STA $91 / JMP $F6ED: the normal STOP check, but as if RUN/STOP were held down
 STUB_CODE = bytes([0xA9, 0x7F, 0x85, 0x91, 0x4C, 0xED, 0xF6])
@@ -99,6 +106,8 @@ def keys_to_codes(data, shift_upper):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-t", "--timeout", type=float, default=0.5, help="seconds to wait for a key (default 0.5)")
+    ap.add_argument("-d", "--disconnect-wait", type=float, default=1.0, metavar="SECONDS",
+                    help="seconds to stay disconnected after Ctrl-Return (default 1)")
     ap.add_argument("-b", "--no-background", action="store_true", help="omit the background color")
     ap.add_argument("-s", "--shift-upper", action="store_true", help="send upper-case letters shifted")
     ap.add_argument("--hb", type=int, default=0, metavar="N", help="border columns left and right (default 0)")
@@ -108,6 +117,8 @@ def main():
     ap.add_argument("-c", "--charset", choices=["auto", "upper", "lower"], default="auto")
     ap.add_argument("-H", "--host", help="host[:port] (required unless $TR_HOST is set; port defaults to 2112)")
     a = ap.parse_args()
+    if a.disconnect_wait < 0:
+        ap.error("--disconnect-wait must not be negative")
     if a.hb < 0 or a.vb < 0:
         ap.error("--hb and --vb must not be negative")
     if not sys.stdin.isatty():
@@ -158,6 +169,7 @@ def main():
         with TR(*split_host(a.host)) as tr:
             tty.setraw(fd)
             out.write("\x1b[?1049h\x1b[?25l\x1b[2J")  # alternate screen, hide cursor
+            armed = False  # Ctrl-\\ pressed: the next key is sent, then disconnect
             broken = False  # connection suspect (after a reset or a bad reply): reconnect first
             while True:
                 rows = None
@@ -185,6 +197,29 @@ def main():
                 data = os.read(fd, 64)
                 if QUIT in data:
                     break
+                disconnect = None  # PETSCII codes to type, then drop the connection
+                if data in RETURN_DISCONNECT:
+                    disconnect = [13]
+                elif armed or data.startswith(PREFIX):
+                    data = data if armed else data[1:]
+                    armed = False
+                    if not data:
+                        armed = True  # the key to send comes in the next read
+                        continue
+                    disconnect = keys_to_codes(data, a.shift_upper)
+                    if not disconnect:
+                        continue  # unmappable key: cancel
+                if disconnect:
+                    try:
+                        type_codes(tr, disconnect, timeout=1.0)
+                    except (TRError, OSError):
+                        pass
+                    tr.close()
+                    out.write("\x1b[H\x1b[0mdisconnected, reconnecting...\x1b[K")
+                    out.flush()
+                    time.sleep(a.disconnect_wait)
+                    broken = True  # reconnect before the next redraw
+                    continue
                 if RESET in data:
                     try:
                         tr.reset()
