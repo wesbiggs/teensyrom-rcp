@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Show or change the disk image a VDrive unit (the TR+ virtual IEC drive) serves, while a C64 program runs.
+
+usage: trvdrive [-H HOST[:PORT]] [sd|usb] [IMAGE | -u]
+
+  trvdrive            show both units          trvdrive sd /GAMES/DISK2.D64   mount an image (path on that card)
+  trvdrive usb        show the USB unit        trvdrive sd -u                 unmount (the folder stays selected)
+
+Needs firmware with VDrive (0.9.0.8 or newer) and the VDrive KERNAL running.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from trlib import TR, TRError, split_host  # noqa: E402
+
+HOSTHELP = "host[:port] (required unless $TR_HOST is set; port defaults to 2112)"
+
+
+def show(st):
+    disk = st["path"] if st["mounted"] else "(no image)"
+    ro = "" if st["writable"] or not st["mounted"] else " [read-only]"
+    pin = " (fixed)" if st["fixed"] else ""
+    print(f"{st['storage']:>3}  device {st['device']}{pin}  {disk}{ro}  cwd {st['cwd']}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-H", "--host", help=HOSTHELP)
+    ap.add_argument("drive", nargs="?", choices=["sd", "usb"])
+    ap.add_argument("image", nargs="?", help="image path on that card, e.g. /GAMES/DISK2.D64")
+    ap.add_argument("-u", "--unmount", action="store_true")
+    a = ap.parse_args()
+    if (a.image or a.unmount) and not a.drive:
+        ap.error("name the drive (sd or usb) to change it")
+    if a.image and a.unmount:
+        ap.error("give an image or -u, not both")
+    try:
+        with TR(*split_host(a.host)) as tr:
+            if a.image or a.unmount:
+                show(tr.vdrive_set(a.drive, "" if a.unmount else a.image))
+            else:
+                for d in ([a.drive] if a.drive else ["sd", "usb"]):
+                    show(tr.vdrive_get(d))
+    except TRError as e:
+        print(f"trvdrive: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

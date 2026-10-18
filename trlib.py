@@ -529,3 +529,48 @@ def _spans_ack(self, what, first=False):
 
 TR._spans_ack = _spans_ack
 TR.write_spans = _write_spans
+
+
+# VDrive (virtual IEC drive firmware, https://github.com/wesbiggs/teensyrom-vdrive): what the SD / USB drive has mounted.
+VDRIVE_GET = 0x64E3
+VDRIVE_SET = 0x64E4
+
+
+def _vdrive_line(self, what):
+    """The JSON line that follows an AckToken."""
+    buf = b""
+    while not buf.endswith(b"\n"):
+        buf += self._recv(1)
+    return json.loads(buf.decode("utf-8", "replace"))
+
+
+def _vdrive_get(self, drive):
+    """State of one VDrive unit: {'unit','storage','device','fixed','mounted','writable','path','cwd'}."""
+    if drive not in DRIVES:
+        raise TRError(f"unknown drive {drive!r} (use sd or usb)")
+    self.sock.sendall(struct.pack(">HB", VDRIVE_GET, DRIVES[drive]))
+    self._expect_ack(f"vdrive {drive}")
+    return _vdrive_line(self, "vdrive")
+
+
+def _vdrive_set(self, drive, path):
+    """Mount the image at `path` (on that drive's card) on the unit, or unmount with path ''. Returns the new state.
+
+    The firmware waits for a quiet moment on the C64's drive (up to 3 s), so allow for that in the socket timeout.
+    """
+    if drive not in DRIVES:
+        raise TRError(f"unknown drive {drive!r} (use sd or usb)")
+    if path:
+        _check_path(path)
+    old = self.sock.gettimeout()
+    self.sock.settimeout(max(old or 0, 8.0))
+    try:
+        self.sock.sendall(struct.pack(">HB", VDRIVE_SET, DRIVES[drive]) + path.encode() + b"\0")
+        self._expect_ack(f"vdrive {drive}:{path or '(unmount)'}")
+        return _vdrive_line(self, "vdrive")
+    finally:
+        self.sock.settimeout(old)
+
+
+TR.vdrive_get = _vdrive_get
+TR.vdrive_set = _vdrive_set
