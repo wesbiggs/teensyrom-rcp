@@ -6,7 +6,8 @@ usage: trvdrive [-H HOST[:PORT]] [sd|usb] [IMAGE | -u]
   trvdrive            show both units          trvdrive sd /GAMES/DISK2.D64   mount an image (path on that card)
   trvdrive usb        show the USB unit        trvdrive sd -u                 unmount (the folder stays selected)
 
-Needs firmware with VDrive (0.9.0.8 or newer) and the VDrive KERNAL running.
+Needs firmware with VDrive (0.9.0.8 or newer). While the TR menu is showing (firmware 0.9.0.12 or newer) it shows and changes the image each unit
+will mount at the next start (its /.vdrive file); with the VDrive KERNAL running it works on the live drive.
 """
 import argparse
 import os
@@ -22,7 +23,12 @@ def show(st):
     disk = st["path"] if st["mounted"] else "(no image)"
     ro = "" if st["writable"] or not st["mounted"] else " [read-only]"
     pin = " (fixed)" if st["fixed"] else ""
-    print(f"{st['storage']:>3}  device {st['device']}{pin}  {disk}{ro}  cwd {st['cwd']}")
+    if st.get("running", True):
+        print(f"{st['storage']:>3}  device {st['device']}{pin}  {disk}{ro}  cwd {st['cwd']}")
+    else:   # TR menu showing: this is the image remembered on the card, which the unit mounts at the next start
+        dev = f"device {st['device']}{pin}" if st["fixed"] else "device auto"
+        note = "(VDrive not running: mounted at the next start)" if st["mounted"] else "(VDrive not running)"
+        print(f"{st['storage']:>3}  {dev}  {disk}  {note}")
 
 
 def main():

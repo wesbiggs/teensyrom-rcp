@@ -545,7 +545,8 @@ def _vdrive_line(self, what):
 
 
 def _vdrive_get(self, drive):
-    """State of one VDrive unit: {'unit','storage','device','fixed','mounted','writable','path','cwd'}."""
+    """State of one VDrive unit: {'unit','storage','device','fixed','mounted','writable','path','cwd'}, plus 'running': False
+    (firmware 0.9.0.12+) when the TR menu is showing and path is the image remembered for the next start."""
     if drive not in DRIVES:
         raise TRError(f"unknown drive {drive!r} (use sd or usb)")
     self.sock.sendall(struct.pack(">HB", VDRIVE_GET, DRIVES[drive]))
