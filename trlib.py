@@ -5,6 +5,7 @@ Tokens/fields are sent big-endian; replies from the TR are little-endian.
 """
 import json
 import os
+import select
 import socket
 import struct
 import time
@@ -25,16 +26,90 @@ class TRError(Exception):
     pass
 
 
+class SerialPort:
+    """The few socket methods TR uses (sendall, recv, settimeout, gettimeout, close),
+    over a USB serial device. POSIX only (termios); no third-party serial library."""
+
+    def __init__(self, device, timeout=None):
+        import termios
+        try:
+            self.fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError as e:
+            raise TRError(f"cannot open {device}: {e}") from e
+        try:
+            attrs = termios.tcgetattr(self.fd)
+            attrs[0] = attrs[1] = attrs[3] = 0      # iflag, oflag, lflag: raw
+            attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+            attrs[6][termios.VMIN], attrs[6][termios.VTIME] = 0, 0
+            termios.tcsetattr(self.fd, termios.TCSANOW, attrs)  # the baud rate is irrelevant over USB
+            termios.tcflush(self.fd, termios.TCIOFLUSH)
+        except (OSError, termios.error) as e:
+            os.close(self.fd)
+            raise TRError(f"{device} is not a usable serial port: {e}") from e
+        self._timeout = timeout
+
+    def settimeout(self, timeout):
+        self._timeout = timeout
+
+    def gettimeout(self):
+        return self._timeout
+
+    def sendall(self, data):
+        view = memoryview(data)
+        deadline = None if self._timeout is None else time.time() + max(self._timeout, 5.0)
+        while view:
+            try:
+                n = os.write(self.fd, view)
+            except BlockingIOError:
+                n = 0
+            except OSError as e:
+                raise TRError(f"serial write failed: {e}") from e
+            view = view[n:]
+            if view:
+                left = None if deadline is None else deadline - time.time()
+                if left is not None and left <= 0:
+                    raise TRError("timed out writing to TeensyROM")
+                select.select([], [self.fd], [], left)
+
+    def recv(self, n):
+        if not select.select([self.fd], [], [], self._timeout)[0]:
+            raise socket.timeout("timed out")
+        try:
+            data = os.read(self.fd, n)
+        except BlockingIOError:
+            raise socket.timeout("timed out") from None
+        except OSError as e:
+            raise TRError(f"serial read failed: {e}") from e
+        if not data:  # EOF: the device went away
+            return b""
+        return data
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def is_serial(host):
+    """A host that is a device path (/dev/cu.usbmodem1101, /dev/ttyACM0) selects USB serial."""
+    return host.startswith("/")
+
+
 class TR:
     def __init__(self, host=None, port=None, timeout=10.0):
         self.host = host or os.environ.get("TR_HOST")
         if not self.host:
             raise TRError("No TR_HOST value set or --host specified")
-        self.port = int(port or os.environ.get("TR_PORT", DEFAULT_PORT))
+        self.serial = is_serial(self.host)
+        if not self.serial:
+            self.port = int(port or os.environ.get("TR_PORT", DEFAULT_PORT))
         self.timeout = timeout
         self._connect()
 
     def _connect(self):
+        if self.serial:
+            self.sock = SerialPort(self.host, self.timeout)
+            return
         try:
             self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError as e:

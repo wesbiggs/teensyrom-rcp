@@ -1,6 +1,6 @@
 # teensyrom-rcp
 
-Small command-line tools for reading and writing a TeensyROM+ (TR+) SD card and USB drive, and for controlling the attached C64, over TCP. Requires Python 3, standard library only.
+Small command-line tools for reading and writing a TeensyROM+ (TR+) SD card and USB drive, and for controlling the attached C64, over TCP or USB serial. Requires Python 3, standard library only.
 
 They speak the [TeensyROM remote command protocol](https://github.com/SensoriumEmbedded/TeensyROM/blob/main/docs/ControlComms.md) on port 2112.
 
@@ -23,6 +23,15 @@ They speak the [TeensyROM remote command protocol](https://github.com/SensoriumE
    ```
 
    `trpng` works on local files only and needs no host.
+
+   **USB serial instead of TCP:** if the host value starts with `/`, it is taken as a serial device and used in place of TCP (no network or TCP listener needed; just the USB cable to the Teensy). macOS and Linux only; no extra packages.
+
+   ```bash
+   export TR_HOST=/dev/cu.usbmodem1101    # macOS; Linux is usually /dev/ttyACM0
+   ./trstat
+   ```
+
+   Only one program can use the port at a time (close any serial monitor first). `TR_PORT` and `:port` do not apply.
 
 3. Run the scripts from this directory (they are executable), or put the directory on your `PATH`.
 
@@ -140,7 +149,7 @@ If the screen can't be shown (the VIC is in bitmap mode, or the screen sits unde
 
 [c64img.py](c64img.py) decodes Koala/Art files and writes PNGs (standard library only).
 
-[trlib.py](trlib.py) holds the protocol client (`TR` class: `list_dir`, `list_all`, `get_file`, `put_file`, `delete_file`, `copy_file`, `launch`, `reset`, `version`, `pause`, `read_mem`, `write_mem`) and is easy to reuse from your own scripts:
+[trlib.py](trlib.py) holds the protocol client (`TR` class, over TCP or, for a host that is a `/dev/...` path, USB serial: `list_dir`, `list_all`, `get_file`, `put_file`, `delete_file`, `copy_file`, `launch`, `reset`, `version`, `pause`, `read_mem`, `write_mem`) and is easy to reuse from your own scripts:
 
 ```python
 from trlib import TR
