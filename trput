@@ -14,14 +14,18 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from trlib import TR, TRError, parse_target  # noqa: E402
 
 
-def remote_exists(tr, drive, path):
-    parent, _, name = path.rpartition("/")
+def put(tr, drive, path, data, force):
+    """Upload; with force, a refusal for an existing file deletes it and tries again. Asking the TR
+    (rather than checking a listing first) also covers names that differ only in case (FAT is
+    case-insensitive) and hidden dotfiles, which directory listings omit."""
     try:
-        entries = tr.list_all(drive, parent or "/")
-    except TRError:  # parent directory doesn't exist yet
-        tr.reconnect()
-        return False
-    return any(e.get("name") == name and e.get("type") != "dir" for e in entries)
+        return tr.put_file(drive, path, data)
+    except TRError as e:
+        if not force or "already exists" not in str(e):
+            raise
+    tr.reconnect()
+    tr.delete_file(drive, path)
+    return tr.put_file(drive, path, data)
 
 
 def main():
@@ -57,9 +61,7 @@ def main():
                     status = 1
                     continue
                 try:
-                    if args.force and remote_exists(tr, drive, path):
-                        tr.delete_file(drive, path)  # the TR refuses to write over an existing file
-                    n = tr.put_file(drive, path, data)
+                    n = put(tr, drive, path, data, args.force)
                 except TRError as e:
                     print(f"trput: {local}: {e}", file=sys.stderr)
                     status = 1
